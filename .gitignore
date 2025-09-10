@@ -1,2 +1,4 @@
 /target
 .vscode
+dark_window.log
+Cargo.lock

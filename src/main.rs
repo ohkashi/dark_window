@@ -3,10 +3,12 @@
 
 use std::ffi::c_void;
 use std::{fs::File, path::Path};
-use std::mem;
+use std::{mem, ptr};
+use std::sync::atomic::{ AtomicBool, Ordering };
 
 use log::*;
 use simplelog::*;
+use time::macros::format_description;
 
 use windows::{
     core::*,
@@ -16,21 +18,21 @@ use windows::{
     Win32::UI::WindowsAndMessaging::*,
 };
 
-static mut IS_DARK_MODE: bool = false;
-static mut IS_FIRST_PAINT: bool = true;
+static IS_DARK_MODE: AtomicBool = AtomicBool::new(false);
+static IS_FIRST_PAINT: AtomicBool = AtomicBool::new(true);
 
 fn check_dark_mode() {
     unsafe {
         let mut key = HKEY::default();
-        RegOpenKeyExA(HKEY_CURRENT_USER, s!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), 0, KEY_READ, &mut key);
+        let _ = RegOpenKeyExA(HKEY_CURRENT_USER, s!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), Some(0), KEY_READ, &mut key);
         let mut len = std::mem::size_of::<u32>() as u32;
         let mut buffer = vec![0u8; len as usize];
-        RegQueryValueExA(key, s!("AppsUseLightTheme"), None, None, Some(buffer.as_mut_ptr() as _), Some(&mut len));
-        RegCloseKey(key);
+        let _ = RegQueryValueExA(key, s!("AppsUseLightTheme"), None, None, Some(buffer.as_mut_ptr() as _), Some(&mut len));
+        let _ = RegCloseKey(key);
         if buffer[0] == 0 {
-            IS_DARK_MODE = true
+            IS_DARK_MODE.store(true, Ordering::Relaxed)
         } else {
-            IS_DARK_MODE = false
+            IS_DARK_MODE.store(false, Ordering::Relaxed)
         }
     }
 }
@@ -105,7 +107,7 @@ fn enable_blur_behind(hwnd: HWND) -> bool {
     let bb = DWM_BLURBEHIND {
         dwFlags: DWM_BB_ENABLE,
         fEnable: true.into(),
-        hRgnBlur: None.into(),
+        hRgnBlur: HRGN(0 as *mut c_void),
         fTransitionOnMaximized: false.into(),
     };
 
@@ -146,26 +148,37 @@ fn set_window_blur(hwnd: HWND, accent_state: ACCENT_STATE) -> bool {
 fn main() -> Result<()> {
     unsafe {
         let instance = GetModuleHandleA(None).unwrap();
-        debug_assert!(instance.0 != 0);
+        debug_assert!(instance.0 != ptr::null_mut());
 
         let exe_path = std::env::current_exe().unwrap();
         let exename = exe_path.file_name().unwrap().to_str().unwrap();
         let fname = Path::new(exename).file_stem().unwrap();
         let log_fname = Path::new(fname).with_extension("log");
 
+        let config = ConfigBuilder::new()
+            .set_time_format_custom(format_description!("[year]-[month]-[day] [hour]:[minute]:[second]"))
+            .set_time_offset_to_local() // Or set a fixed offset
+            .unwrap() // Handle potential error if local offset can't be determined
+            .build();
+        let config2 = ConfigBuilder::new()
+            .set_time_format_custom(format_description!("[year]-[month]-[day] [hour]:[minute]:[second]"))
+            .set_time_offset_to_local() // Or set a fixed offset
+            .unwrap() // Handle potential error if local offset can't be determined
+            .build();
+
         CombinedLogger::init(vec![
-            #[cfg(feature = "termcolor")]
+            //#[cfg(feature = "termcolor")]
             TermLogger::new(
                 LevelFilter::Warn,
-                Config::default(),
+                config,
                 TerminalMode::Mixed,
                 ColorChoice::Auto,
             ),
-            #[cfg(not(feature = "termcolor"))]
+            //#[cfg(not(feature = "termcolor"))]
             SimpleLogger::new(LevelFilter::Warn, Config::default()),
             WriteLogger::new(
                 LevelFilter::Trace,
-                Config::default(),
+                config2,
                 File::create(log_fname).unwrap(),
             ),
         ]).unwrap();
@@ -178,7 +191,7 @@ fn main() -> Result<()> {
 
         let wc = WNDCLASSA {
             hCursor: LoadCursorW(None, IDC_ARROW)?,
-            hInstance: instance,
+            hInstance: instance.into(),
             lpszClassName: window_class,
 
             style: CS_HREDRAW | CS_VREDRAW,
@@ -209,7 +222,7 @@ fn main() -> Result<()> {
             cy,
             None,
             None,
-            instance,
+            Some(instance.into()),
             None,
         );
 
@@ -226,7 +239,7 @@ extern "system" fn wndproc(window: HWND, message: u32, wparam: WPARAM, lparam: L
     unsafe {
         match message {
             WM_CREATE => {
-                enable_dark_mode(window, IS_DARK_MODE);
+                enable_dark_mode(window, IS_DARK_MODE.load(Ordering::Relaxed));
                 if !set_backdrop_type(window, DWMSBT_TRANSIENTWINDOW) {
                     let margins = MARGINS {
                         cxLeftWidth: -1,
@@ -242,12 +255,12 @@ extern "system" fn wndproc(window: HWND, message: u32, wparam: WPARAM, lparam: L
                 LRESULT(0)
             }
             WM_ERASEBKGND => {
-                let hdc = HDC(wparam.0 as isize);
+                let hdc = HDC(wparam.0 as _);
                 let mut rect = RECT::default();
-                GetClientRect(window, &mut rect);
+                let _ = GetClientRect(window, &mut rect);
                 let clr_text: COLORREF;
                 let clr_bk: COLORREF;
-                match IS_DARK_MODE {
+                match IS_DARK_MODE.load(Ordering::Relaxed) {
                     false => {
                         clr_bk = COLORREF(0x00ffffff);
                         clr_text = COLORREF(0);
@@ -259,18 +272,18 @@ extern "system" fn wndproc(window: HWND, message: u32, wparam: WPARAM, lparam: L
                 };
                 let brush = CreateSolidBrush(clr_bk);
                 FillRect(hdc, &rect as *const RECT, brush);
-                DeleteObject(brush);
+                let _ = DeleteObject(brush.into());
 
                 SetBkColor(hdc, clr_bk);
                 SetTextColor(hdc, clr_text);
                 let mut rc_text = RECT::from(rect);
-                let mut text = String::from("Rust Dev");
+                let mut text = String::from("Rust Dev!");
                 DrawTextA(hdc, text.as_bytes_mut(), &mut rc_text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                if IS_FIRST_PAINT {
-                    IS_FIRST_PAINT = false;
+                if IS_FIRST_PAINT.load(Ordering::Relaxed) {
+                    IS_FIRST_PAINT.store(false, Ordering::Relaxed);
                     debug!("first paint.");
-                    RedrawWindow(window, None, None, RDW_FRAME | RDW_INVALIDATE);
-                    InvalidateRect(window, None, true);
+                    let _ = RedrawWindow(Some(window), None, None, RDW_FRAME | RDW_INVALIDATE);
+                    let _ = InvalidateRect(Some(window), None, true);
                 }
                 LRESULT(0)
             }
@@ -288,8 +301,8 @@ extern "system" fn wndproc(window: HWND, message: u32, wparam: WPARAM, lparam: L
             WM_SETTINGCHANGE => {
                 debug!("WM_SETTINGCHANGE");
                 check_dark_mode();
-                enable_dark_mode(window, IS_DARK_MODE);
-                InvalidateRect(window, None, true);
+                enable_dark_mode(window, IS_DARK_MODE.load(Ordering::Relaxed));
+                let _ = InvalidateRect(Some(window), None, true);
                 LRESULT(0)
             }
             _ => DefWindowProcA(window, message, wparam, lparam),
