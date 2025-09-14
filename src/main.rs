@@ -9,6 +9,7 @@ use std::sync::atomic::{ AtomicBool, Ordering };
 use log::*;
 use simplelog::*;
 use time::macros::format_description;
+use encoding_rs::EUC_KR;
 
 use windows::{
     core::*,
@@ -277,8 +278,10 @@ extern "system" fn wndproc(window: HWND, message: u32, wparam: WPARAM, lparam: L
                 SetBkColor(hdc, clr_bk);
                 SetTextColor(hdc, clr_text);
                 let mut rc_text = RECT::from(rect);
-                let mut text = String::from("Rust Dev!");
-                DrawTextA(hdc, text.as_bytes_mut(), &mut rc_text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                rc_text.top = rect.bottom / 3 + 16;
+                let text = String::from("Hello world!\n안녕 세상!");
+                let (ansi, _, _) = EUC_KR.encode(&text);
+                DrawTextA(hdc, ansi.into_owned().as_mut(), &mut rc_text, DT_CENTER | DT_NOPREFIX);
                 if IS_FIRST_PAINT.load(Ordering::Relaxed) {
                     IS_FIRST_PAINT.store(false, Ordering::Relaxed);
                     debug!("first paint.");

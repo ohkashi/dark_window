@@ -22,3 +22,4 @@ features = [
 log = { version = "0.4.*", features = ["std"] }
 simplelog = "^0.12.0"
 time = "0.3"
+encoding_rs = "0.8.35"
